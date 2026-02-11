@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# IDE / editor
+.vscode/
+.history/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# App runtime data
+app/data/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
