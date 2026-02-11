@@ -1,5 +1,9 @@
 # XMD ToolBox Plan (ZBrush 2026.1)
 
+> **Last updated:** 2026-02-11 — End of brush grid + thumbnail extraction session.
+> **Current state:** Brush panel fully functional with thumbnail grid. Settings system,
+> first-run setup, and ZBrush auto-detect complete. Ready for polish and next asset types.
+
 This plan defines the architecture and workflow for the XMD ToolBox 4.0 — an external
 PySide6 desktop application that organizes ZBrush assets, with a lightweight ZBrush-side
 bridge plugin for command execution.
@@ -37,30 +41,30 @@ bridge plugin for command execution.
 XMDToolBox/
 ├── app/                      # External PySide6 application
 │   ├── __init__.py
-│   ├── main.py               # Entry point
-│   ├── main_window.py        # Main window with dockable panels
+│   ├── main.py               # Entry point (first-run gate → main window)
+│   ├── main_window.py        # Main window with dockable panels + toolbar
 │   ├── models.py             # Data models (BrushMetadata)
 │   ├── local_store.py        # Local JSON metadata store (dev)
-│   ├── config.py             # Constants, asset types, brush types, icon map
+│   ├── config.py             # Constants, asset types, brush types, scan folders, icon map
 │   ├── ipc.py                # File-based IPC writer
-│   ├── theme.py              # Dark theme QSS stylesheet
-│   ├── icons/                # Flat-style SVG panel/tab icons (20×20, stroke)
-│   │   ├── brushes.svg
-│   │   ├── alphas.svg
-│   │   ├── textures.svg
-│   │   ├── materials.svg
-│   │   ├── fibers.svg
-│   │   ├── tools.svg
-│   │   ├── lights.svg
-│   │   ├── projects.svg
-│   │   ├── grids.svg
-│   │   ├── array_mesh.svg
-│   │   ├── spotlights.svg
-│   │   ├── render_presets.svg
-│   │   ├── documents.svg
+│   ├── theme.py              # Dark theme QSS stylesheet (~450 lines)
+│   ├── settings.py           # JSON-backed persistent app settings (AppSettings)
+│   ├── settings_dialog.py    # Settings dialog with category sidebar
+│   ├── setup_dialog.py       # First-run setup wizard (ZBrush path selection)
+│   ├── zbrush_detect.py      # Auto-detect ZBrush installs (registry + Program Files)
+│   ├── zbp_thumbnail.py      # ZBP thumbnail extractor (port of Pixologic algorithm)
+│   ├── brush_scanner.py      # Scans ZBrush dirs for .ZBP files, caches thumbnails
+│   ├── brush_grid.py         # QListWidget in icon mode — thumbnail grid with search
+│   ├── icons/                # Flat-style SVG panel/tab icons (20×20 viewBox, 32×32 size)
+│   │   ├── brushes.svg … documents.svg  (13 asset-type icons)
 │   │   ├── favorites.svg
 │   │   └── metadata.svg
-│   └── data/                 # Runtime data (JSON metadata, IPC dir)
+│   └── data/                 # Runtime data (created at runtime, not committed)
+│       ├── brush_metadata.json    # User metadata store
+│       ├── brush_cache.json       # Scan index cache
+│       ├── thumbnails/            # Cached .rgba thumbnail files (96×96)
+│       ├── settings.json          # Persistent app settings
+│       └── ipc/                   # IPC command files
 ├── zbrush_plugin/            # ZBrush-side bridge
 │   └── xmd_bridge.py         # Reads IPC commands, executes SDK calls
 ├── xmd_toolbox/              # (Legacy) In-ZBrush plugin code — may be removed
@@ -127,9 +131,9 @@ PySide6-QtAds>=4.5
 
 | Panel | Status | Notes |
 |-------|--------|-------|
-| Brushes | **Done** | List + search + favorites filter, center area |
-| Metadata | **Done** | Form: description, type dropdown, category, tags, author, favorite toggle, save |
-| Favorites | **Done** | Shortlist, double-click to jump to brush |
+| Brushes | **Done** | Grid view with 96×96 thumbnails extracted from .ZBP files. Search filter + favorites toggle. Scans ZBrush install dirs on startup. Deduplicates by name across ZBrushes/ZData/ZStartup folders. |
+| Metadata | **Done** | Form: description, type dropdown, category, tags, author, favorite toggle, save. Populates on brush grid selection. |
+| Favorites | **Done** | Shortlist, double-click to jump to brush metadata. |
 | Alphas | Stubbed | "Coming soon" placeholder |
 | Textures | Stubbed | "Coming soon" placeholder |
 | Materials | Stubbed | "Coming soon" placeholder |
@@ -143,10 +147,60 @@ PySide6-QtAds>=4.5
 | Render Presets | Stubbed | "Coming soon" placeholder |
 | Documents | Stubbed | "Coming soon" placeholder |
 
-### Toolbar — PARTIAL
+### Settings System — DONE
 
-- "About" action — opens about dialog. **Done.**
-- "Panels" action — exists but **not wired** to toggle panel visibility.
+- **AppSettings** (`settings.py`): JSON-backed persistent settings with auto-save.
+  Properties for `zbrush_path`, `first_run_complete`, and all UI prefs.
+- **SetupDialog** (`setup_dialog.py`): First-run wizard shown before main window.
+  Lists auto-detected ZBrush installs or lets user browse manually.
+  Blocks until user completes setup or cancels (exits app).
+- **SettingsDialog** (`settings_dialog.py`): Full settings dialog opened from toolbar.
+  Category sidebar with General page + per-asset-type pages.
+  General page has: Options checkboxes, ZBrush Path with browse + auto-detect,
+  Advanced Options (Import/Export DB, Rescan).
+- **ZBrush auto-detect** (`zbrush_detect.py`): Scans Windows registry
+  (`HKLM/HKCU` under `Maxon` and `Pixologic` keys) and `Program Files` directories.
+  Returns sorted list newest-first.
+- `main.py` checks `first_run_complete` — if false, shows SetupDialog before main window.
+- Settings button in toolbar opens SettingsDialog.
+
+### ZBP Thumbnail Extraction — DONE
+
+- **zbp_thumbnail.py**: Port of Pixologic's `ReadZBrushFileThumbnail` (by Ofer Alon).
+  Searches for magic pattern `00 90 00 00 04 00 80 01` starting 200 bytes into the file.
+  Handles compression version 4 (4× 2-byte block sizes) and v5+ (12-byte skip + 2× 4-byte).
+  RLE decompression: positive byte = repeat, negative = literal run, 0 = end sentinel.
+  v6+ has extra 4-byte skip per block.
+  Decompressed data is planar: interleaved into 4 sub-channels per block.
+  R↔B swap happens inline during alpha channel write (same as C++ code).
+  Alpha is optionally boosted (squared * 0.5, capped at 255) for dark-background icons.
+  Output: 96×96 RGBA, 36 864 bytes. Saved as raw `.rgba` files in `app/data/thumbnails/`.
+
+### Brush Scanner — DONE
+
+- **brush_scanner.py**: Scans `ZBrushes`, `ZData/BrushPresets`, and
+  `ZStartup/BrushPresets` subdirectories of the configured ZBrush install path.
+  Deduplicates by brush name (first occurrence wins — ZBrushes scanned first).
+  Extracts thumbnails via `zbp_thumbnail.py` and caches as `.rgba` files.
+  Maintains a JSON cache (`brush_cache.json`) keyed by file path + mtime.
+  Subsequent launches skip extraction for unchanged files.
+  Category is derived from the immediate parent folder name.
+
+### Brush Grid — DONE
+
+- **brush_grid.py**: `BrushGridWidget` wrapping a `QListWidget` in `IconMode`.
+  72×72 display size, 96×96 source thumbnails scaled with smooth transformation.
+  Consistent label positioning at bottom of each cell (placeholder pixmap for missing thumbs).
+  Search input filters by name substring. Favorites toggle button.
+  Emits `brush_selected(name, path)` signal on click.
+  In-memory pixmap cache for loaded thumbnails.
+
+### Toolbar — DONE
+
+- "About" action — opens about dialog.
+- "Panels" dropdown — per-panel checkable visibility toggles.
+- "Settings" button — opens SettingsDialog.
+- "Reset Layout" button — restores default dock layout.
 
 ### Data Layer — DONE (local dev)
 
@@ -166,26 +220,37 @@ PySide6-QtAds>=4.5
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| Settings / Preferences UI | Medium | ZBrush install path config, user preferences |
+| IPC protocol finalization | High | Define command schema, add response handling, test with bridge |
+| Activate brush in ZBrush | High | Send selected brush path via IPC to bridge plugin |
 | Non-Brush asset models | Medium | Only `BrushMetadata` exists; need generic asset model |
-| Brush directory scanning | Medium | Scan ZBrush folders and populate store |
-| IPC protocol finalization | Medium | Define command schema, add response handling |
+| Alpha/Texture/Material scanning | Medium | Reuse scanner pattern with different extensions/thumbnail logic |
+| Brush type auto-detection | Medium | Parse ZBP data to determine brush type (Standard, Clay, Insert, etc.) |
+| Grid label truncation polish | Low | Long names get elided; could show full name on hover |
+| Async scanning with progress bar | Low | Current scan blocks UI briefly on first run (~2s for 200 brushes) |
 | S3 storage backend | Low | Deferred until metadata schema stabilizes |
+| ZBrush bridge plugin testing | Low | `xmd_bridge.py` exists but untested with 2026.1 |
 
 ## Completed
 
 | Feature | Date | Notes |
 |---------|------|-------|
-| Panel visibility toggle | 2026-02-11 | Toolbar "Panels" dropdown menu with per-panel checkable actions |
-| Dock layout persistence | 2026-02-11 | Auto-save on close, restore on launch, Save/Reset toolbar buttons |
+| Dark theme & docking | 2026-02-11 | QtAds panels, QSS dark theme, SVG tab icons |
+| Panel visibility toggle | 2026-02-11 | Toolbar "Panels" dropdown with per-panel checkable actions |
+| Dock layout persistence | 2026-02-11 | Auto-save on close, restore on launch, Reset toolbar button |
+| Settings system | 2026-02-11 | AppSettings (JSON), SettingsDialog, first-run SetupDialog |
+| ZBrush auto-detect | 2026-02-11 | Registry + Program Files scan, sorted newest-first |
+| ZBP thumbnail extraction | 2026-02-11 | Port of Pixologic ReadZBrushFileThumbnail algorithm |
+| Brush directory scanning | 2026-02-11 | Recursive scan with mtime-based caching and dedup |
+| Brush grid view | 2026-02-11 | QListWidget icon mode, 72px thumbnails, search + favorites |
 
 ---
 
 ## Open Questions
 
 - Socket-based IPC feasibility (requires confirming threading in ZBrush VM).
-- Brush directory scanning UX (manual trigger vs. file watchers).
 - Favorites storage scope (global vs. per user/project).
+- Brush type auto-detection — can brush type be parsed from ZBP binary data?
+- Whether to show brush category (folder name) as a filterable field in the grid.
 
 ## Resolved Decisions
 
@@ -198,6 +263,15 @@ PySide6-QtAds>=4.5
 - Metadata schema for brushes: name, description, brush_type (dropdown), category,
   tags, author, favorite, file_path, scan_date.
 - Brush identification: by name. Brush directory path is configurable.
+- Brush directory scanning: ZBrushes scanned first, ZData/ZStartup also scanned.
+  `ZStartup/BrushPresets` was the brush preset location before ZBrush 2026.1.
+  `ZData/BrushPresets` is the location for ZBrush 2026.1+.
+  Deduplication is by brush name (first occurrence wins).
+- Thumbnail extraction: Port of Pixologic's C++ `ReadZBrushFileThumbnail`.
+  Icons saved as raw `.rgba` 96×96 files for fastest load (no PNG encode/decode).
+  Cached on disk with mtime-based invalidation.
+- Grid display: QListWidget in IconMode (not a custom painter). 72px display size.
+  Labels truncated with Qt text elide. Full name shown in tooltip.
 - Storage: S3 is planned but deferred. Local JSON file store used during development.
 - Brush type taxonomy: 46 types defined in `config.py`.
 - File extensions per asset type defined in `config.py` for directory scanning.
@@ -239,3 +313,44 @@ PySide6-QtAds>=4.5
   - Mitigation: use config(2026) or explicit state checks.
 - Limited modeling API access.
   - Mitigation: rely on UI actions and available queries.
+
+---
+
+## Current State Summary (for AI handoff)
+
+**What works right now:**
+The app launches, shows a first-run setup dialog if no ZBrush path is configured,
+auto-detects ZBrush installations, then opens the main window with a dockable panel
+layout. The Brushes tab shows a grid of ~216 brush thumbnails extracted directly from
+`.ZBP` files using a port of Pixologic's C++ algorithm. Search and favorites filtering
+work. Clicking a brush populates the Metadata panel form. Settings persist to JSON.
+Layout state persists across launches.
+
+**How to run:**
+```
+cd D:\Perforce\_APPS_Python\XMDToolBox
+.venv\Scripts\python.exe app/main.py
+```
+
+**Key technical details an AI needs to know:**
+1. ZBP thumbnails use a block-compressed planar format with a magic byte scan.
+   The algorithm is in `app/zbp_thumbnail.py` — do NOT try to rewrite this casually.
+   It was painstakingly reverse-engineered from C++ source in the old ToolBox 4.0
+   repo (`mdunnam/XMDToolBox4.0`, branch `trunk`, file `Util/brushiconimageprovider.cpp`).
+2. Thumbnails are cached as raw `.rgba` files (not PNG) in `app/data/thumbnails/`.
+   A JSON cache index at `app/data/brush_cache.json` tracks mtime for invalidation.
+3. Brushes are deduplicated by name across scan directories. `ZBrushes` folder is
+   scanned first and wins on name collision.
+4. The old C++/Qt ToolBox 4.0 repo at `mdunnam/XMDToolBox4.0` has working reference
+   implementations for all resource types. Use `github_repo` tool to search it.
+5. The `xmd_toolbox/` directory is legacy code from an earlier ZScript-based approach.
+   It may be removed. The active code is in `app/` and `zbrush_plugin/`.
+6. ZBrush 2026.1 changed the brush preset location from `ZStartup/BrushPresets` to
+   `ZData/BrushPresets`. The scanner checks both.
+
+**What to work on next (in priority order):**
+1. Polish the brush grid — consider showing category grouping or folder headers.
+2. Wire IPC: clicking a brush should send its path to ZBrush via the bridge plugin.
+3. Implement alpha/texture scanning (different file formats, no ZBP extraction needed).
+4. Add brush type auto-detection from ZBP binary data (if possible).
+5. Test `xmd_bridge.py` inside ZBrush 2026.1.
