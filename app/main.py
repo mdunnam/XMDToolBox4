@@ -18,6 +18,8 @@ if _PROJECT_ROOT not in sys.path:
 from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
+from app.settings import AppSettings
+from app.setup_dialog import SetupDialog
 from app.theme import STYLESHEET
 
 
@@ -28,7 +30,15 @@ def main() -> None:
     app.setStyle("Fusion")  # Fusion base gives the best dark-mode foundation.
     app.setStyleSheet(STYLESHEET)
 
-    window = MainWindow()
+    settings = AppSettings()
+
+    # First-run setup — show before the main window.
+    if not settings.first_run_complete:
+        dlg = SetupDialog(settings)
+        if dlg.exec() == SetupDialog.DialogCode.Rejected:
+            sys.exit(0)
+
+    window = MainWindow(settings=settings)
     window.show()
 
     sys.exit(app.exec())

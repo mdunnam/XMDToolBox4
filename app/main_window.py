@@ -48,17 +48,20 @@ from .config import (
 )
 from .local_store import LocalStore
 from .models import BrushMetadata
+from .settings import AppSettings
+from .settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
     """Top-level application window with dockable panels."""
 
-    def __init__(self) -> None:
+    def __init__(self, settings: AppSettings | None = None) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.resize(1400, 900)
         self.setMinimumSize(900, 600)
 
+        self._settings = settings or AppSettings()
         self._store = LocalStore(LOCAL_METADATA_PATH)
 
         # QtAds: configure before creating the dock manager.
@@ -114,6 +117,11 @@ class MainWindow(QMainWindow):
         if isinstance(panels_btn, QToolButton):
             panels_btn.setMenu(self._panels_menu)
             panels_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+        toolbar.addSeparator()
+
+        # Settings
+        toolbar.addAction("Settings", self._on_settings)
 
         toolbar.addSeparator()
 
@@ -536,6 +544,12 @@ class MainWindow(QMainWindow):
             "About",
             f"{APP_NAME}  {APP_VERSION}\n\nAsset organizer for ZBrush.",
         )
+
+    @Slot()
+    def _on_settings(self) -> None:
+        """Open the Settings dialog."""
+        dlg = SettingsDialog(self._settings, parent=self)
+        dlg.exec()
 
     @Slot()
     def _on_brush_selected(self) -> None:
