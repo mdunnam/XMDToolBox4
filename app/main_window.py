@@ -46,6 +46,8 @@ from .config import (
     LOCAL_METADATA_PATH,
     TAB_ICONS,
 )
+from .brush_grid import BrushGridWidget
+from .brush_scanner import scan_brush_directories
 from .local_store import LocalStore
 from .models import BrushMetadata
 from .settings import AppSettings
@@ -309,47 +311,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_brushes_panel(self) -> QWidget:
-        """Build the main Brushes list panel.
+        """Build the grid-based Brushes browser panel.
 
         Returns:
             The constructed QWidget.
         """
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        # Header
-        header = QLabel("Brushes")
-        header.setProperty("heading", True)
-        layout.addWidget(header)
-
-        # Search row
-        search_row = QHBoxLayout()
-        search_row.setSpacing(8)
-
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Search brushes…")
-        self._search_input.setClearButtonEnabled(True)
-        self._search_input.textChanged.connect(self._on_search_changed)
-        search_row.addWidget(self._search_input)
-
-        self._favorites_btn = QPushButton("★ Favorites")
-        self._favorites_btn.setCheckable(True)
-        self._favorites_btn.setFixedWidth(110)
-        self._favorites_btn.toggled.connect(self._on_favorites_toggled)
-        search_row.addWidget(self._favorites_btn)
-
-        layout.addLayout(search_row)
-
-        # Brush list
-        self._brush_list = QListWidget()
-        self._brush_list.setAlternatingRowColors(True)
-        self._brush_list.currentItemChanged.connect(self._on_brush_selected)
-        layout.addWidget(self._brush_list)
-
-        self._refresh_brush_list()
-        return container
+        self._brush_grid = BrushGridWidget()
+        self._brush_grid.brush_selected.connect(self._on_brush_selected)
+        self._scan_brushes()
+        return self._brush_grid
 
     # ------------------------------------------------------------------
     # Metadata panel
@@ -466,32 +436,21 @@ class MainWindow(QMainWindow):
     # Brush list helpers
     # ------------------------------------------------------------------
 
-    def _refresh_brush_list(
-        self, filter_text: str = "", favorites_only: bool = False
-    ) -> None:
-        """Reload the brush list widget from the local store.
+    def _scan_brushes(self) -> None:
+        """Scan for brushes using the configured ZBrush path."""
+        zbrush_path = self._settings.zbrush_path
+        if not zbrush_path:
+            return
 
-        Args:
-            filter_text: Optional search substring filter.
-            favorites_only: If True, show only favorite brushes.
-        """
-        self._brush_list.clear()
-
-        if filter_text:
-            names = self._store.search(filter_text)
-        else:
-            names = self._store.list_brushes()
-
-        if favorites_only:
-            fav_set = set(self._store.get_favorites())
-            names = [n for n in names if n in fav_set]
-
-        for name in names:
-            meta = self._store.get_brush(name)
-            display = f"★  {name}" if meta.favorite else name
-            item = QListWidgetItem(display)
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            self._brush_list.addItem(item)
+        brushes = scan_brush_directories(
+            zbrush_path,
+            on_progress=lambda cur, tot, name: self.statusBar().showMessage(
+                f"Scanning brushes… {cur}/{tot}: {name}"
+            ),
+        )
+        self._brush_grid.set_brushes(brushes)
+        self._brush_grid.set_favorites(set(self._store.get_favorites()))
+        self.statusBar().showMessage(f"Found {len(brushes)} brushes", 5000)
 
     def _refresh_favorites_list(self) -> None:
         """Reload the favorites panel list."""
@@ -522,15 +481,12 @@ class MainWindow(QMainWindow):
         )
 
     def _current_brush_name(self) -> str | None:
-        """Return the brush name from the currently selected list item.
+        """Return the brush name from the currently selected grid item.
 
         Returns:
             The brush name, or None if nothing is selected.
         """
-        item = self._brush_list.currentItem()
-        if item is None:
-            return None
-        return item.data(Qt.ItemDataRole.UserRole)
+        return self._brush_grid.current_brush_name()
 
     # ------------------------------------------------------------------
     # Slots
@@ -551,19 +507,24 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self._settings, parent=self)
         dlg.exec()
 
-    @Slot()
-    def _on_brush_selected(self) -> None:
-        """Handle brush selection change in the list."""
-        name = self._current_brush_name()
-        if name is None:
+    @Slot(str, str)
+    def _on_brush_selected(self, name: str, path: str) -> None:
+        """Handle brush selection change in the grid.
+
+        Args:
+            name: The selected brush name.
+            path: The selected brush file path.
+        """
+        if not name:
             return
         meta = self._store.get_brush(name)
+        meta.file_path = path
         self._load_metadata_into_panel(meta)
 
     @Slot()
     def _on_save_metadata(self) -> None:
         """Save the current metadata form back to the store."""
-        name = self._current_brush_name()
+        name = self._brush_grid.current_brush_name()
         if name is None:
             return
 
@@ -578,38 +539,11 @@ class MainWindow(QMainWindow):
         meta.favorite = self._fav_btn.isChecked()
         self._store.put_brush(meta)
 
-        # Refresh lists to reflect changes.
-        self._refresh_brush_list(
-            filter_text=self._search_input.text(),
-            favorites_only=self._favorites_btn.isChecked(),
-        )
+        # Refresh favorites.
+        self._brush_grid.set_favorites(set(self._store.get_favorites()))
         self._refresh_favorites_list()
 
         self.statusBar().showMessage(f"Saved metadata for '{name}'", 3000)
-
-    @Slot(str)
-    def _on_search_changed(self, text: str) -> None:
-        """Filter the brush list as the user types.
-
-        Args:
-            text: The current search input text.
-        """
-        self._refresh_brush_list(
-            filter_text=text,
-            favorites_only=self._favorites_btn.isChecked(),
-        )
-
-    @Slot(bool)
-    def _on_favorites_toggled(self, checked: bool) -> None:
-        """Toggle between showing all brushes and favorites only.
-
-        Args:
-            checked: Whether the favorites filter is active.
-        """
-        self._refresh_brush_list(
-            filter_text=self._search_input.text(),
-            favorites_only=checked,
-        )
 
     @Slot(QListWidgetItem)
     def _on_fav_double_clicked(self, item: QListWidgetItem) -> None:
@@ -621,9 +555,5 @@ class MainWindow(QMainWindow):
         name = item.data(Qt.ItemDataRole.UserRole)
         if name is None:
             return
-        # Find and select in the main brush list.
-        for i in range(self._brush_list.count()):
-            li = self._brush_list.item(i)
-            if li and li.data(Qt.ItemDataRole.UserRole) == name:
-                self._brush_list.setCurrentItem(li)
-                break
+        meta = self._store.get_brush(name)
+        self._load_metadata_into_panel(meta)
